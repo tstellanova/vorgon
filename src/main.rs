@@ -15,7 +15,7 @@ use imageproc::{
     corners::corners_fast12,
     filter::{
         // gaussian_blur_f32,
-        // median_filter,
+        median_filter,
         filter3x3,
     },
 };
@@ -52,6 +52,80 @@ pub fn calculate_laplacian_variance(image: &GrayImage) -> f32 {
     sum_of_squares - (mean * mean)
 }
 
+
+//fn histogram_spread(histogram: [u32; 256]) -> f32 {
+//     let total_count: u32 = histogram.iter().sum();
+//     let mut cumulative_sum = 0;
+//     let mut first_quartile = 0;
+//     let mut third_quartile = 0;
+//
+//     for (i, &count) in histogram.iter().enumerate() {
+//         cumulative_sum += count;
+//         if cumulative_sum >= total_count / 4 && first_quartile == 0 {
+//             first_quartile = i;
+//         }
+//         if cumulative_sum >= 3 * total_count / 4 {
+//             third_quartile = i;
+//             break;
+//         }
+//     }
+//
+//     let quartile_distance = third_quartile as f32 - first_quartile as f32;
+//     let range = 255.0; // For an 8-bit grayscale image
+//
+//     quartile_distance / range
+// }
+
+
+pub fn hist_mean_spread_flatness(image: &GrayImage) -> (u8, f64, f64)
+{
+    let channel_hist = imageproc::stats::histogram(&image);
+    let mut min_intensity = u8::MAX;
+    let mut max_intensity = u8::MIN;
+    let mut total_intensity: usize = 0;
+    let mut cumulative_count: usize = 0;
+    let mut first_quartile = 0;
+    let mut third_quartile = 0;
+    let mut hfm = 0.0; // Histogram Flatness Measure
+
+    // TODO don't we already know the total number of pixels already from image size
+    let total_pixels: usize = (image.width() * image.height()) as usize;
+
+    if let Some(hist) = channel_hist.channels.first() {
+        let measured_total_pixels = hist.iter().sum::<u32>() as usize;
+        assert_eq!(total_pixels, measured_total_pixels);
+        let total_pixels_f64 = total_pixels as f64;
+        let first_quartile_count = total_pixels / 4;
+        let third_quartile_count =  3 * total_pixels / 4;
+
+        for i in 0..256 {
+            let count = hist[i] as usize;
+            if count > 0 {
+                let intensity = i as u8;
+                if intensity > max_intensity { max_intensity = intensity; }
+                if intensity < min_intensity { min_intensity = intensity; }
+                total_intensity += count * (intensity as usize);
+                // flatness calculation
+                let probability = count as f64 / total_pixels_f64;
+                hfm -= probability * probability.log2(); // calculate entropy
+                // spreading calculation
+                cumulative_count += count;
+                if (first_quartile == 0) && (cumulative_count >= first_quartile_count) {
+                    first_quartile = i;
+                }
+                if (third_quartile == 0) && (cumulative_count >= third_quartile_count) {
+                    third_quartile = i;
+                }
+            }
+        }
+    }
+
+    let quartile_distance = third_quartile  - first_quartile ;
+    let hist_spread = (quartile_distance as f64) / 255.0;
+    let mean_intensity = (total_intensity / total_pixels) as u8;
+
+    (mean_intensity, hist_spread, hfm)
+}
 
 pub fn mean_intensity_and_contrast(image: &GrayImage) -> (u8, u8) {
     let mut max_intensity: u8 = 0;
@@ -149,6 +223,9 @@ pub fn count_corners(img: &GrayImage) -> u32 {
 #[derive(Serialize)]
 pub struct ImageQAttributes {
     sharpness: f32,
+    mean_intensity: u8,
+    hist_spread: f64,
+    hist_flatness: f64,
     corner_count: u32,
 }
 
@@ -157,10 +234,20 @@ pub fn analyze_image(img: &GrayImage)  -> ImageQAttributes {
     let mut tsms:i64 = 0;
 
     let mut qattrs = ImageQAttributes::default();
+
     timest(&mut tsms);
-    // println!("{} >> start sharpness ",  timest(&mut tsms));
-    qattrs.sharpness = calculate_laplacian_variance(&img);
-    // println!("{} << end sharpness ",  timest(&mut tsms));
+    // // println!("{} >> start sharpness ",  timest(&mut tsms));
+    // qattrs.sharpness = calculate_laplacian_variance(&img);
+    // // println!("{} << end sharpness ",  timest(&mut tsms));
+    timex(&mut tsms, &mut durations);
+
+    timest(&mut tsms);
+    // println!("{} >> start histo ",  timest(&mut tsms));
+    let (mean, spread, flatness) = hist_mean_spread_flatness(&img);
+    qattrs.mean_intensity = mean;
+    qattrs.hist_spread = spread;
+    qattrs.hist_flatness = flatness;
+    // println!("{} << end histo ",  timest(&mut tsms));
     timex(&mut tsms, &mut durations);
 
     timest(&mut tsms);
@@ -169,7 +256,7 @@ pub fn analyze_image(img: &GrayImage)  -> ImageQAttributes {
     // println!("{} << end corners ",  timest(&mut tsms));
     timex(&mut tsms, &mut durations);
 
-    // println!("analyze durations {:?}", durations);
+    println!("analyze durations {:?}", durations);
 
     qattrs
 }
@@ -182,7 +269,7 @@ pub fn analyze_image(img: &GrayImage)  -> ImageQAttributes {
 //     }
 // }
 
-fn main() {
+pub fn process_directory() {
     let mut tsms:i64 = 0;
     timest(&mut tsms);
 
@@ -233,10 +320,12 @@ fn main() {
     for i in 1..entries.len() {
         println!("image {} analysis", i);
         let entry_path:PathBuf = entries[i].path();
-        let orig_img =
+        let cur_img =
           image::open(entry_path.clone()).unwrap().to_luma8();
-        let cur_img = imageproc::noise::salt_and_pepper_noise(
-            &orig_img,0.2, 5150);
+        // let cur_img = imageproc::noise::gaussian_noise(
+        //     &cur_img,6.0, 3.0, 5150);
+        // let cur_img = imageproc::noise::salt_and_pepper_noise(
+        //     &cur_img,0.2, 5150);
         let qattrs = analyze_image(&cur_img);
         analyses.push(qattrs);
 
@@ -374,4 +463,51 @@ fn main() {
     // ssim23_grey.save("out_ssim23.png").unwrap();
     // ssim_1_blur2_map.save("out_ssim_1_blur2_map.png").unwrap();
     // ssim_blur2_3_map.save("out_ssim_blur2_3_map.png").unwrap();
+}
+
+fn main() {
+    let mut tsms: i64 = 0;
+    timest(&mut tsms);
+
+
+    let filename1 = "1584484441_frame_100.ppm";
+    let filename2 = "1584484441_frame_5005.ppm";
+    let filename3 = "1670019436_frame_22815.ppm";
+    let filename4 = "1670019436_frame_22815_overex.ppm";
+    let filename5 = "1670019436_frame_22815_underex.ppm";
+    let filename6 = "1670019436_frame_22815_overcont.ppm";
+    let filename7 = "1670019436_frame_22815_undercont.ppm";
+
+    println!("{} >> open & convert to grays ",  timest(&mut tsms));
+    let img1 = image::open(filename1).unwrap().to_luma8();
+    let img2 = image::open(filename2).unwrap().to_luma8();
+    let img3 = image::open(filename3).unwrap().to_luma8();
+    let img3_overex = image::open(filename4).unwrap().to_luma8();
+    let img3_underex = image::open(filename5).unwrap().to_luma8();
+    let img3_overcont = image::open(filename6).unwrap().to_luma8();
+    let img3_undercont = image::open(filename7).unwrap().to_luma8();
+    println!("{} >> end convert to grays ",  timest(&mut tsms));
+
+    let blur_radius = 4;
+    println!("{} >> start blur radius {}",  timest(&mut tsms), blur_radius);
+    let blur2 = median_filter(&img2, blur_radius, blur_radius);
+    println!("{} << end blur ",  timest(&mut tsms));
+
+    let qattr = analyze_image(&img1);
+    println!("img1: {}", to_string_pretty(&qattr).unwrap());
+    let qattr = analyze_image(&img2);
+    println!("img2: {}", to_string_pretty(&qattr).unwrap());
+    let qattr = analyze_image(&blur2);
+    println!("blur2: {}", to_string_pretty(&qattr).unwrap());
+    let qattr = analyze_image(&img3);
+    println!("img3: {}", to_string_pretty(&qattr).unwrap());
+    let qattr = analyze_image(&img3_overex);
+    println!("img3_overex: {}", to_string_pretty(&qattr).unwrap());
+    let qattr = analyze_image(&img3_underex);
+    println!("img3_underex: {}", to_string_pretty(&qattr).unwrap());
+    let qattr = analyze_image(&img3_overcont);
+    println!("img3_overcont: {}", to_string_pretty(&qattr).unwrap());
+    let qattr = analyze_image(&img3_undercont);
+    println!("img3_underrcont: {}", to_string_pretty(&qattr).unwrap());
+
 }
