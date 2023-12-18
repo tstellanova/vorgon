@@ -237,7 +237,7 @@ pub fn analyze_image(img: &GrayImage)  -> ImageQAttributes {
 
     timest(&mut tsms);
     // // println!("{} >> start sharpness ",  timest(&mut tsms));
-    // qattrs.sharpness = calculate_laplacian_variance(&img);
+    qattrs.sharpness = calculate_laplacian_variance(&img);
     // // println!("{} << end sharpness ",  timest(&mut tsms));
     timex(&mut tsms, &mut durations);
 
@@ -477,6 +477,7 @@ fn main() {
     let filename5 = "1670019436_frame_22815_underex.ppm";
     let filename6 = "1670019436_frame_22815_overcont.ppm";
     let filename7 = "1670019436_frame_22815_undercont.ppm";
+    let filename8 = "1670019436_frame_cropped.png";
 
     println!("{} >> open & convert to grays ",  timest(&mut tsms));
     let img1 = image::open(filename1).unwrap().to_luma8();
@@ -486,6 +487,7 @@ fn main() {
     let img3_underex = image::open(filename5).unwrap().to_luma8();
     let img3_overcont = image::open(filename6).unwrap().to_luma8();
     let img3_undercont = image::open(filename7).unwrap().to_luma8();
+    let img3_cropped = image::open(filename8).unwrap().to_luma8();
     println!("{} >> end convert to grays ",  timest(&mut tsms));
 
     let blur_radius = 4;
@@ -509,5 +511,7 @@ fn main() {
     println!("img3_overcont: {}", to_string_pretty(&qattr).unwrap());
     let qattr = analyze_image(&img3_undercont);
     println!("img3_underrcont: {}", to_string_pretty(&qattr).unwrap());
-
+    let qattr = analyze_image(&img3_cropped);
+    println!("img3_cropped: {}", to_string_pretty(&qattr).unwrap());
 }
+
