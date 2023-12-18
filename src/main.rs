@@ -15,7 +15,7 @@ use imageproc::{
     corners::corners_fast12,
     filter::{
         // gaussian_blur_f32,
-        median_filter,
+        // median_filter,
         filter3x3,
     },
 };
@@ -269,7 +269,7 @@ pub fn analyze_image(img: &GrayImage)  -> ImageQAttributes {
 //     }
 // }
 
-pub fn process_directory() {
+pub fn process_directory() -> anyhow::Result<()> {
     let mut tsms:i64 = 0;
     timest(&mut tsms);
 
@@ -304,14 +304,14 @@ pub fn process_directory() {
     entries.sort_by_key(|entry| entry.file_name());
     let first_filename = entries.first().unwrap().path();
     // println!("first_filename: {:?}", first_filename);
-    // let last_filename = entries.last().unwrap().path();
+    // let last_filename = entries.last()?.path();
     // println!("last_filename: {:?}", last_filename);
 
     let mut analyses: Vec<ImageQAttributes> = Vec::new();
     let mut comparisons: Vec<ImgComparison> = Vec::new();
 
     let first_img =
-      image::open(first_filename.clone()).unwrap().to_luma8();
+      image::open(first_filename.clone())?.to_luma8();
     println!("image 0 analysis");
     let qattrs = analyze_image(&first_img);
     analyses.push(qattrs);
@@ -321,7 +321,7 @@ pub fn process_directory() {
         println!("image {} analysis", i);
         let entry_path:PathBuf = entries[i].path();
         let cur_img =
-          image::open(entry_path.clone()).unwrap().to_luma8();
+          image::open(entry_path.clone())?.to_luma8();
         // let cur_img = imageproc::noise::gaussian_noise(
         //     &cur_img,6.0, 3.0, 5150);
         // let cur_img = imageproc::noise::salt_and_pepper_noise(
@@ -347,15 +347,16 @@ pub fn process_directory() {
     println!("analyses: {}", to_string_pretty(&analyses).unwrap());
     println!("comparisons: {}",to_string_pretty(&comparisons).unwrap());
 
+    Ok(())
     /*
     let filename1 = "1670019436_frame_22814.ppm";
     let filename2 = "1670019436_frame_22815.ppm";
     let filename3 = "1670019436_frame_22816.ppm";
 
     println!("{} >> open & convert to grays ",  timest(&mut tsms));
-    let img1 = image::open(filename1).unwrap().to_luma8();
-    let img2 = image::open(filename2).unwrap().to_luma8();
-    let img3 = image::open(filename3).unwrap().to_luma8();
+    let img1 = image::open(filename1)?.to_luma8();
+    let img2 = image::open(filename2)?.to_luma8();
+    let img3 = image::open(filename3)?.to_luma8();
     println!("{} >> end convert to grays ",  timest(&mut tsms));
 
     println!("{} >> save grays ",  timest(&mut tsms));
@@ -465,53 +466,40 @@ pub fn process_directory() {
     // ssim_blur2_3_map.save("out_ssim_blur2_3_map.png").unwrap();
 }
 
-fn main() {
+fn analyze_local_images() -> anyhow::Result<()> {
     let mut tsms: i64 = 0;
     timest(&mut tsms);
 
-
-    let filename1 = "1584484441_frame_100.ppm";
-    let filename2 = "1584484441_frame_5005.ppm";
-    let filename3 = "1670019436_frame_22815.ppm";
-    let filename4 = "1670019436_frame_22815_overex.ppm";
-    let filename5 = "1670019436_frame_22815_underex.ppm";
-    let filename6 = "1670019436_frame_22815_overcont.ppm";
-    let filename7 = "1670019436_frame_22815_undercont.ppm";
-    let filename8 = "1670019436_frame_cropped.png";
+    let filenames = vec!(
+        "1584484441_frame_100.ppm",
+        "1584484441_frame_5005.ppm",
+        "1670019436_frame_22815.ppm",
+        "1670019436_frame_22815_blur.ppm",
+        "1670019436_frame_22815_overex.ppm",
+        "1670019436_frame_22815_underex.ppm",
+        "1670019436_frame_22815_overcont.ppm",
+        "1670019436_frame_22815_undercont.ppm",
+        "1670019436_frame_cropped.png",
+        );
 
     println!("{} >> open & convert to grays ",  timest(&mut tsms));
-    let img1 = image::open(filename1).unwrap().to_luma8();
-    let img2 = image::open(filename2).unwrap().to_luma8();
-    let img3 = image::open(filename3).unwrap().to_luma8();
-    let img3_overex = image::open(filename4).unwrap().to_luma8();
-    let img3_underex = image::open(filename5).unwrap().to_luma8();
-    let img3_overcont = image::open(filename6).unwrap().to_luma8();
-    let img3_undercont = image::open(filename7).unwrap().to_luma8();
-    let img3_cropped = image::open(filename8).unwrap().to_luma8();
+    let mut images = Vec::new();
+    for i in 0..filenames.len() {
+        let img = image::open(filenames[i])?.to_luma8();
+        images.push(img);
+    }
     println!("{} >> end convert to grays ",  timest(&mut tsms));
 
-    let blur_radius = 4;
-    println!("{} >> start blur radius {}",  timest(&mut tsms), blur_radius);
-    let blur2 = median_filter(&img2, blur_radius, blur_radius);
-    println!("{} << end blur ",  timest(&mut tsms));
+    for i in 0..images.len() {
+        let qattr = analyze_image(&images[i]);
+        println!("{} : {}",  filenames[i], to_string_pretty(&qattr)?);
+    }
 
-    let qattr = analyze_image(&img1);
-    println!("img1: {}", to_string_pretty(&qattr).unwrap());
-    let qattr = analyze_image(&img2);
-    println!("img2: {}", to_string_pretty(&qattr).unwrap());
-    let qattr = analyze_image(&blur2);
-    println!("blur2: {}", to_string_pretty(&qattr).unwrap());
-    let qattr = analyze_image(&img3);
-    println!("img3: {}", to_string_pretty(&qattr).unwrap());
-    let qattr = analyze_image(&img3_overex);
-    println!("img3_overex: {}", to_string_pretty(&qattr).unwrap());
-    let qattr = analyze_image(&img3_underex);
-    println!("img3_underex: {}", to_string_pretty(&qattr).unwrap());
-    let qattr = analyze_image(&img3_overcont);
-    println!("img3_overcont: {}", to_string_pretty(&qattr).unwrap());
-    let qattr = analyze_image(&img3_undercont);
-    println!("img3_underrcont: {}", to_string_pretty(&qattr).unwrap());
-    let qattr = analyze_image(&img3_cropped);
-    println!("img3_cropped: {}", to_string_pretty(&qattr).unwrap());
+    Ok(())
 }
 
+
+
+fn main() -> anyhow::Result<()> {
+    analyze_local_images()
+}
