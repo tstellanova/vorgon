@@ -12,7 +12,7 @@ use image::buffer::ConvertBuffer;
 
 use image::{GrayImage, ImageBuffer};
 use regex::Regex;
-use vorgon::{analyze_image, crop_gray_to_percent};
+use vorgon::{crop_gray_to_percent, fast_analyze_image, MonoImageQAttributes};
 
 
 fn main() -> Result<(), ffmpeg::Error> {
@@ -27,10 +27,13 @@ fn main() -> Result<(), ffmpeg::Error> {
   let finds = regx.captures(&hay).unwrap();
   let video_file_prefix = &finds[1];
   let video_id = &finds[2];
-  println!("prefix: {:?} video_id: {:?}", video_file_prefix, video_id);
+
+  println!("# prefix: {:?} video_id: {:?} start: {} end: {}",
+           video_file_prefix, video_id, start_frame, end_frame);
 
   // CSV header
-  println!("frame,sharpness,mean_intensity,hist_spread,hist_flatness,corner_count");
+  // println!("frame,sharpness,mean_intensity,hist_spread,hist_flatness,corner_count");
+  println!("frame,mean_intensity,hist_spread,f12_corners");
 
   if let Ok(mut ictx) = ffmpeg_input(&filename) {
     let input = ictx
@@ -122,19 +125,56 @@ fn process_frame(frame: &Video,  index: usize) -> std::result::Result<(), std::i
   // our images have strong vignetting, so we crop out the edges
   let crop_img = crop_gray_to_percent(&gray_img, 0.8);
 
-  let qattr = analyze_image(&crop_img);
-  // Simple CSV output
-  println!("{},{},{},{},{},{}",
-           index,
-           qattr.sharpness,
-           qattr.mean_intensity,
-           qattr.hist_spread,
-           qattr.hist_flatness,
-           qattr.corner_count,
-  );
-
+  let qattr = fast_analyze_image(&crop_img);
+  // if is_nominal(&qattr) {
+    // Simple CSV output
+    println!("{},{},{:0.6},{}",
+             index,
+             qattr.mean_intensity,
+             qattr.hist_spread,
+             qattr.corner_count_f12,
+    );
+  // }
+  // else {
+  //   let frame_mins = index / (30*60);
+  //   let frame_secs = (index / 30) % 60;
+  //   println!("invalid ({}) {:02}:{:02}", index, frame_mins, frame_secs);
+  // }
 
   Ok(())
 }
 
+const INTENSITY_MEAN: f32 = 117.0;
+const INTENSITY_STDDEV: f32  = 9.0;
+const HSPREAD_MEAN: f32 = 0.5;
+const HSPREAD_STDDEV: f32  = 0.09;
+const F12_CORNERS_MEAN: f32 = 4000.0;
+const F12_CORNERS_STDEV: f32 = 1000.0;
 
+
+pub fn is_nominal(qattrs: &MonoImageQAttributes) -> bool
+{
+  let zscore_intense = zscore_within_stddev(
+    INTENSITY_MEAN, INTENSITY_STDDEV, qattrs.mean_intensity as f32);
+  let zscore_hspread = zscore_within_stddev(
+    HSPREAD_MEAN, HSPREAD_STDDEV, qattrs.hist_spread as f32);
+  let zscore_f12 = zscore_within_stddev(
+    F12_CORNERS_MEAN, F12_CORNERS_STDEV, qattrs.corner_count_f12 as f32);
+
+  if !zscore_intense { println!("bad intensity: {}", qattrs.mean_intensity)}
+  if !zscore_hspread { println!("bad hspread: {}", qattrs.hist_spread)}
+  if !zscore_f12 { println!("bad f12: {}", qattrs.corner_count_f12)}
+
+  // println!("int {} hspread {} f12 {}", zscore_intense, zscore_hspread, zscore_f12);
+  zscore_intense && zscore_hspread && zscore_f12
+}
+
+pub fn zscore_within_stddev(mean: f32, stddev: f32, val: f32) -> bool
+{
+  let zscore = (val - mean)/stddev;
+  let nom = (zscore >= -2.0) && (zscore <= 2.0);
+  // if !nom {
+  //   println!("val: {} zscore: {}", val, zscore);
+  // }
+  nom
+}

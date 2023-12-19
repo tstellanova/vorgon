@@ -15,20 +15,28 @@ use imageproc::{
     filter3x3,
   },
 };
+use imageproc::corners::corners_fast9;
 // use imageproc::drawing::Canvas;
 
 /// Describes the "inherent" quality of an image,
 /// with no reference to another image.
 #[derive(Debug)]
 #[derive(Default)]
-pub struct ImageQAttributes {
+pub struct MonoImageQAttributes {
   pub width: u32,
   pub height: u32,
+  /// Measurement of sharpness, maybe Laplacian variance or zero
   pub sharpness: f32,
+  /// The mean intensity of all pixels
   pub mean_intensity: u8,
+  /// Histogram spread
   pub hist_spread: f64,
+  /// Histogram flatness
   pub hist_flatness: f64,
-  pub corner_count: u32,
+  /// FAST9 corners
+  pub corner_count_f12: u32,
+  /// FAST12 corners
+  pub corner_count_f9: u32
 }
 
 /// Crop image to some percentage of its original dimensions:
@@ -122,8 +130,6 @@ pub fn hist_mean_spread_flatness(image: &GrayImage) -> (u8, f64, f64)
   let total_pixels: usize = (image.width() * image.height()) as usize;
 
   if let Some(hist) = channel_hist.channels.first() {
-    let measured_total_pixels = hist.iter().sum::<u32>() as usize;
-    assert_eq!(total_pixels, measured_total_pixels);
     let total_pixels_f64 = total_pixels as f64;
     let first_quartile_count = total_pixels / 4;
     let third_quartile_count =  3 * total_pixels / 4;
@@ -157,33 +163,60 @@ pub fn hist_mean_spread_flatness(image: &GrayImage) -> (u8, f64, f64)
   (mean_intensity, hist_spread, hfm)
 }
 
-// pub fn mean_intensity_and_contrast(image: &GrayImage) -> (u8, u8) {
-//   let mut max_intensity: u8 = 0;
-//   let mut min_intensity: u8 = 255;
-//   let mut total_intensity: u32 = 0;
-//
-//   // Iterate over each pixel to find the max and min intensity values
-//   for pixel in image.pixels() {
-//     let intensity = pixel.0[0];
-//     total_intensity += intensity as u32;
-//     if intensity > max_intensity {
-//       max_intensity = intensity;
-//     }
-//     if intensity < min_intensity {
-//       min_intensity = intensity;
-//     }
-//   }
-//   let avg_intensity = (total_intensity / image.pixels().count() as u32) as u8;
-//   let contrast = max_intensity - min_intensity;
-//   (avg_intensity, contrast)
-// }
+
+/// Returns (mean_intensity, histogram_flatness)
+pub fn hist_mean_spread(image: &GrayImage) -> (u8, f64)
+{
+  let channel_hist = imageproc::stats::histogram(&image);
+  let mut min_intensity = u8::MAX;
+  let mut max_intensity = u8::MIN;
+  let mut total_intensity: usize = 0;
+  let mut cumulative_count: usize = 0;
+  let mut first_quartile = 0;
+  let mut third_quartile = 0;
+
+  let total_pixels: usize = (image.width() * image.height()) as usize;
+
+  if let Some(hist) = channel_hist.channels.first() {
+    let first_quartile_count = total_pixels / 4;
+    let third_quartile_count =  3 * total_pixels / 4;
+
+    for i in 0..256 {
+      let count = hist[i] as usize;
+      if count > 0 {
+        let intensity = i as u8;
+        if intensity > max_intensity { max_intensity = intensity; }
+        if intensity < min_intensity { min_intensity = intensity; }
+        total_intensity += count * (intensity as usize);
+
+        // histogram spreading calculation
+        cumulative_count += count;
+        if (first_quartile == 0) && (cumulative_count >= first_quartile_count) {
+          first_quartile = i;
+        }
+        if (third_quartile == 0) && (cumulative_count >= third_quartile_count) {
+          third_quartile = i;
+        }
+      }
+    }
+  }
+
+  let quartile_distance = third_quartile  - first_quartile ;
+  // TODO should we actually use (max_intensity - min_intensity) for divisor (range)?
+  let hist_spread = (quartile_distance as f64) / 255.0;
+  let mean_intensity = (total_intensity / total_pixels) as u8;
+
+  (mean_intensity, hist_spread)
+}
+
+
 
 /// Measure the no-reference quality attributes of an image
-pub fn analyze_image(img: &GrayImage)  -> ImageQAttributes {
+pub fn analyze_image(img: &GrayImage)  -> MonoImageQAttributes {
   let mut durations: Vec<u32> = Vec::new();
   let mut tsms:i64 = 0;
 
-  let mut qattrs = ImageQAttributes::default();
+  let mut qattrs = MonoImageQAttributes::default();
   qattrs.width = img.width();
   qattrs.height = img.height();
 
@@ -205,7 +238,13 @@ pub fn analyze_image(img: &GrayImage)  -> ImageQAttributes {
 
   timest(&mut tsms);
   // println!("{} >> start corners ",  timest(&mut tsms));
-  qattrs.corner_count = count_corners(&img);
+  qattrs.corner_count_f12 = count_corners_fast12(&img);
+  // println!("{} << end corners ",  timest(&mut tsms));
+  timex(&mut tsms, &mut durations);
+
+  timest(&mut tsms);
+  // println!("{} >> start corners ",  timest(&mut tsms));
+  qattrs.corner_count_f9 = count_corners_fast9(&img);
   // println!("{} << end corners ",  timest(&mut tsms));
   timex(&mut tsms, &mut durations);
 
@@ -214,11 +253,70 @@ pub fn analyze_image(img: &GrayImage)  -> ImageQAttributes {
   qattrs
 }
 
+/// Measure the key no-reference quality attributes of an image -- fast
+pub fn fast_analyze_image(img: &GrayImage)  -> MonoImageQAttributes {
+  let mut durations: Vec<u32> = Vec::new();
+  let mut tsms:i64 = 0;
+
+  let mut qattrs = MonoImageQAttributes::default();
+  qattrs.width = img.width();
+  qattrs.height = img.height();
+
+  // timest(&mut tsms);
+  // // // println!("{} >> start sharpness ",  timest(&mut tsms));
+  // let (_laplace_img, sharpness ) = laplacian_variance(&img);
+  // qattrs.sharpness = sharpness;
+  // // // println!("{} << end sharpness ",  timest(&mut tsms));
+  // timex(&mut tsms, &mut durations);
+
+  timest(&mut tsms);
+  // println!("{} >> start histo ",  timest(&mut tsms));
+  let (mean, spread) = hist_mean_spread(&img);
+  qattrs.mean_intensity = mean;
+  qattrs.hist_spread = spread;
+  // println!("{} << end histo ",  timest(&mut tsms));
+  timex(&mut tsms, &mut durations);
+
+  // For fast analysis, limit to one or the other corner detector?
+  timest(&mut tsms);
+  // println!("{} >> start corners ",  timest(&mut tsms));
+  qattrs.corner_count_f12 = count_corners_fast12(&img);
+  // println!("{} << end corners ",  timest(&mut tsms));
+  timex(&mut tsms, &mut durations);
+
+  // timest(&mut tsms);
+  // // println!("{} >> start corners ",  timest(&mut tsms));
+  // qattrs.corner_count_f9 = count_corners_fast9(&img);
+  // // println!("{} << end corners ",  timest(&mut tsms));
+  // timex(&mut tsms, &mut durations);
+
+  // println!("analyze durations {:?}", durations);
+
+  qattrs
+}
+
+/// Estimate the maximum number of corners that could be detected in an
+/// image with the given dimensions, with the estimated corner density.
+///  - `density` is the ratio of non-corner pixels to corner pixels, say 25 for FAST-12
+pub fn estimate_max_corners_fast12(width: u32, height: u32, density: u32) -> u32
+{
+  // the border for FAST-12 is essentially 3 pixels wide
+  assert_ne!(density, 0); assert!(width > 6); assert!(height > 6);
+  (width - 6) * (height - 6) / density
+}
+
 /// Count the number of FAST12 corners in an image
-pub fn count_corners(img: &GrayImage) -> u32 {
+pub fn count_corners_fast12(img: &GrayImage) -> u32 {
   let all_corners = corners_fast12(&img, 32);
   all_corners.len() as u32
 }
+
+/// Count the number of FAST9 corners in an image
+pub fn count_corners_fast9(img: &GrayImage) -> u32 {
+  let all_corners = corners_fast9(&img, 32);
+  all_corners.len() as u32
+}
+
 
 /// Represents a comparison between two images,
 /// where one image provides a reference for comparison.
