@@ -1,4 +1,4 @@
-
+use std::env;
 use ffmpeg_next as ffmpeg;
 use ffmpeg::format::input as ffmpeg_input;
 use ffmpeg::format::{Pixel};
@@ -9,7 +9,7 @@ use ffmpeg::util::frame::video::Video;
 // use std::env;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read};
 use std::path::{Path, PathBuf};
 
 use image::buffer::ConvertBuffer;
@@ -19,7 +19,11 @@ use image::{GrayImage, ImageBuffer};
 use vorgon::{crop_gray_to_percent, fast_analyze_image, MonoImageQAttributes};
 
 
-fn process_video_segment(segment: &SegmentDecscriptor)  {
+fn process_video_segment(segment: &SegmentDecscriptor,
+                         write_stream: &mut impl std::io::Write
+)
+{
+                         // BufWriter<&[u8]>)  {
   // // TODO use clap instead for CLI args?
   // let filename = env::args().nth(1).expect("need video filename");
   // let start_frame = env::args().nth(2).expect("no start frame").parse::<usize>().unwrap();
@@ -36,7 +40,7 @@ fn process_video_segment(segment: &SegmentDecscriptor)  {
 
 
   // CSV header
-  println!("frame,mean_intensity,hist_spread,f12_corners");
+  let _ = write_stream.write_all("frame,mean_intensity,hist_spread,f12_corners".as_ref());
 
   if let Ok(mut ictx) = ffmpeg_input(&segment.file_path) {
     let input = ictx
@@ -75,7 +79,8 @@ fn process_video_segment(segment: &SegmentDecscriptor)  {
             &mut scaler,
             segment.start_frame as usize,
             segment.end_frame as usize,
-            packet_count
+            packet_count,
+            write_stream
           ).unwrap();
         }
         packet_count += 1;
@@ -84,14 +89,16 @@ fn process_video_segment(segment: &SegmentDecscriptor)  {
         }
       }
     }
-    println!("final packet_count: {} start: {} end: {}",
-             packet_count, segment.start_frame, segment.end_frame);
+    // println!("final packet_count: {} start: {} end: {}",
+    //          packet_count, segment.start_frame, segment.end_frame);
     decoder.send_eof().unwrap();
     receive_and_process_decoded_frames(
       &mut decoder, &mut scaler,
       segment.start_frame as usize,
       segment.end_frame as usize,
-      packet_count).unwrap();
+      packet_count,
+      write_stream
+    ).unwrap();
   }
 
 }
@@ -101,7 +108,8 @@ fn receive_and_process_decoded_frames(
   scaler: &mut Context,
   start_frame: usize,
   end_frame: usize,
-  frame_idx: usize)
+  frame_idx: usize,
+  write_stream: &mut impl std::io::Write )
   -> Result<(), ffmpeg::Error>
 {
   let mut decoded = Video::empty();
@@ -109,7 +117,8 @@ fn receive_and_process_decoded_frames(
     if (frame_idx >= start_frame) && (frame_idx <= end_frame) {
       let mut rgb_frame = Video::empty();
       scaler.run(&decoded, &mut rgb_frame)?;
-      process_frame(&rgb_frame,  frame_idx).unwrap();
+      let summary = process_frame(&rgb_frame,  frame_idx).unwrap();
+      write_stream.write_all(summary.as_bytes()).unwrap();
     }
   }
   Ok(())
@@ -119,7 +128,7 @@ fn receive_and_process_decoded_frames(
 // 1670019436 12:30 --> frame (12*60 + 30) * 30 = 22500
 // 1670019436 03:48 --> frame (3*603 + 48) * 30 = 6840
 
-fn process_frame(frame: &Video,  index: usize) -> std::result::Result<(), std::io::Error> {
+fn process_frame(frame: &Video,  index: usize) -> std::result::Result<String, std::io::Error> {
   // for convenience we wrap the video data into an image::ImageBuffer
   let img_buf: ImageBuffer<image::Rgb<u8>, &[u8]> = image::ImageBuffer::from_raw(
     frame.width(), frame.height(), frame.data(0)).unwrap();
@@ -131,22 +140,13 @@ fn process_frame(frame: &Video,  index: usize) -> std::result::Result<(), std::i
   let crop_img = crop_gray_to_percent(&gray_img, 0.8);
 
   let qattr = fast_analyze_image(&crop_img);
-  // if is_nominal(&qattr) {
-    // Simple CSV output
-    println!("{},{},{:0.6},{}",
+  let frame_qstr = format!("{},{},{:0.6},{}",
              index,
              qattr.mean_intensity,
              qattr.hist_spread,
-             qattr.corner_count_f12,
-    );
-  // }
-  // else {
-  //   let frame_mins = index / (30*60);
-  //   let frame_secs = (index / 30) % 60;
-  //   println!("invalid ({}) {:02}:{:02}", index, frame_mins, frame_secs);
-  // }
+             qattr.corner_count_f12);
 
-  Ok(())
+  Ok(frame_qstr)
 }
 
 const INTENSITY_MEAN: f32 = 117.0;
@@ -244,7 +244,6 @@ fn get_segments_list(manifest_path: &Path) -> Vec<SegmentDecscriptor> {
   let mut manifest_file = File::open(&manifest_path).expect("approaches file not found");
   let mut contents = String::new();
   manifest_file.read_to_string(&mut contents).expect("couldn't read approaches file");
-  let base_path = manifest_path.parent().unwrap();
 
   let data: std::collections::HashMap<String, FlightData> =
     serde_json::from_str(&contents).expect("error while parsing approaches");
@@ -253,11 +252,10 @@ fn get_segments_list(manifest_path: &Path) -> Vec<SegmentDecscriptor> {
   for (timestamp, flight_data) in data {
     // println!("Timestamp: {}", timestamp);
     if let Some(approaches) = flight_data.approaches {
-      println!(">>> Approaches: ");
+      // println!(">>> Approaches: ");
       for approach in approaches {
         let mut desc = SegmentDecscriptor::default();
         desc.timestamp_str = timestamp.clone();
-        //TODO construct the file path
 
         // println!("Approach: {}", serde_json::to_string_pretty(&approach).unwrap());
         if approach.note.is_some() {
@@ -275,9 +273,10 @@ fn get_segments_list(manifest_path: &Path) -> Vec<SegmentDecscriptor> {
             approach.annotated_bbox.is_some() {
             desc.validated_runway = true;
           }
-
         }
-        desc.file_path = base_path.with_file_name(approach.stream.clone() + ".mp4");
+
+        desc.file_path = manifest_path.with_file_name(approach.stream.clone() + ".mp4");
+        println!("video file_path: {:?}", desc.file_path);
         segments.push(desc);
       }
     }
@@ -287,19 +286,22 @@ fn get_segments_list(manifest_path: &Path) -> Vec<SegmentDecscriptor> {
 }
 
 fn main() {
+  let manifest_path_str = env::args().nth(1).expect("need manifest filename");
   ffmpeg::init().unwrap();
 
-  let path = Path::new("approaches.json");
-  let segments = get_segments_list(&path);
+  let manifest_path = Path::new(&manifest_path_str);
+  println!("manifest_path: {:?}",manifest_path);
+
+  let segments = get_segments_list(&manifest_path);
   println!("nsegments: {}", segments.len());
 
+  let out_path = manifest_path.parent().unwrap().with_file_name("output.csv");
+  println!("out_path: {:?}", out_path);
+  let mut outfile = File::create(&out_path).unwrap();
+
   for seg in segments {
-    process_video_segment(&seg);
+    process_video_segment(&seg, &mut outfile);
   }
 
-    // for takeoff in flight_data.takeoffs {
-    //   println!("Takeoff: {}", serde_json::to_string_pretty(&takeoff).unwrap());
-    // }
-  // }
 }
 

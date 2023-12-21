@@ -14,11 +14,12 @@ use imageproc::{
     // median_filter,
     filter3x3,
   },
+  // stats::ChannelHistogram,
 };
 use imageproc::corners::corners_fast9;
 // use imageproc::drawing::Canvas;
 
-/// Describes the "inherent" quality of an image,
+/// Describes the "inherent" quality of a single-channel image
 /// with no reference to another image.
 #[derive(Debug)]
 #[derive(Default)]
@@ -33,10 +34,18 @@ pub struct MonoImageQAttributes {
   pub hist_spread: f64,
   /// Histogram flatness
   pub hist_flatness: f64,
+  /// Count of pixels below the "low" brightness threshold
+  pub dark_pixel_count: u32,
+  /// Count of pixels above the "high" brightness threshold
+  pub bright_pixel_count: u32,
+  /// Count of spikes in the histogram
+  pub hist_spike_count: u32,
   /// FAST9 corners
   pub corner_count_f12: u32,
   /// FAST12 corners
-  pub corner_count_f9: u32
+  pub corner_count_f9: u32,
+  // Raw histogram
+  // pub raw_histogram: [u32; 256],
 }
 
 /// Crop image to some percentage of its original dimensions:
@@ -115,7 +124,7 @@ pub fn laplacian_variance(image: &GrayImage) -> (GrayImage, f32) {
 }
 
 /// Returns (mean_intensity, histogram_spread, histogram_flatness)
-pub fn hist_mean_spread_flatness(image: &GrayImage) -> (u8, f64, f64)
+pub fn hist_mean_spread_flatness(image: &GrayImage, qattrs: &mut MonoImageQAttributes)
 {
   let channel_hist = imageproc::stats::histogram(&image);
   let mut min_intensity = u8::MAX;
@@ -160,12 +169,16 @@ pub fn hist_mean_spread_flatness(image: &GrayImage) -> (u8, f64, f64)
   let hist_spread = (quartile_distance as f64) / 255.0;
   let mean_intensity = (total_intensity / total_pixels) as u8;
 
-  (mean_intensity, hist_spread, hfm)
+  qattrs.mean_intensity = mean_intensity;
+  qattrs.hist_spread = hist_spread;
+  qattrs.hist_flatness = hfm;
+  // qattrs.raw_histogram = channel_hist;
+
 }
 
 
-/// Returns (mean_intensity, histogram_flatness)
-pub fn hist_mean_spread(image: &GrayImage) -> (u8, f64)
+/// Performs histogram analysis
+pub fn fast_histogram_analysis(image: &GrayImage, qattrs: &mut MonoImageQAttributes)
 {
   let channel_hist = imageproc::stats::histogram(&image);
   let mut min_intensity = u8::MAX;
@@ -177,20 +190,34 @@ pub fn hist_mean_spread(image: &GrayImage) -> (u8, f64)
 
   let total_pixels: usize = (image.width() * image.height()) as usize;
 
+  let spike_threshold = (total_pixels as f32 * 0.1 ) as i32;
+  let mut prev_count: i32 = 0;
+
   if let Some(hist) = channel_hist.channels.first() {
     let first_quartile_count = total_pixels / 4;
     let third_quartile_count =  3 * total_pixels / 4;
 
     for i in 0..256 {
-      let count = hist[i] as usize;
+      let count = hist[i] as i32;
       if count > 0 {
         let intensity = i as u8;
         if intensity > max_intensity { max_intensity = intensity; }
         if intensity < min_intensity { min_intensity = intensity; }
-        total_intensity += count * (intensity as usize);
+        total_intensity +=  (count as usize) * i ;
+        // guessing that a gaussian dist centered at 127.5
+        // will have exceptional pixels within 1 stddev of min and max
+        if intensity < 43 { qattrs.dark_pixel_count += count as u32; }
+        else if intensity > (u8::MAX - 43) { qattrs.bright_pixel_count += count as u32; }
+
+        let diff = count - prev_count;
+        if diff > spike_threshold {
+          // a spike is any sudden change in count for histogram bucket
+          qattrs.hist_spike_count += 1;
+        }
+        prev_count = count;
 
         // histogram spreading calculation
-        cumulative_count += count;
+        cumulative_count += count as usize;
         if (first_quartile == 0) && (cumulative_count >= first_quartile_count) {
           first_quartile = i;
         }
@@ -204,9 +231,11 @@ pub fn hist_mean_spread(image: &GrayImage) -> (u8, f64)
   let quartile_distance = third_quartile  - first_quartile ;
   // TODO should we actually use (max_intensity - min_intensity) for divisor (range)?
   let hist_spread = (quartile_distance as f64) / 255.0;
-  let mean_intensity = (total_intensity / total_pixels) as u8;
+  let mean_intensity = (total_intensity as f32 / total_pixels as f32) as u8;
 
-  (mean_intensity, hist_spread)
+  qattrs.mean_intensity = mean_intensity;
+  qattrs.hist_spread = hist_spread;
+  // qattrs.raw_histogram = channel_hist;
 }
 
 
@@ -229,10 +258,7 @@ pub fn analyze_image(img: &GrayImage)  -> MonoImageQAttributes {
 
   timest(&mut tsms);
   // println!("{} >> start histo ",  timest(&mut tsms));
-  let (mean, spread, flatness) = hist_mean_spread_flatness(&img);
-  qattrs.mean_intensity = mean;
-  qattrs.hist_spread = spread;
-  qattrs.hist_flatness = flatness;
+  hist_mean_spread_flatness(&img, &mut qattrs);
   // println!("{} << end histo ",  timest(&mut tsms));
   timex(&mut tsms, &mut durations);
 
@@ -271,9 +297,7 @@ pub fn fast_analyze_image(img: &GrayImage)  -> MonoImageQAttributes {
 
   timest(&mut tsms);
   // println!("{} >> start histo ",  timest(&mut tsms));
-  let (mean, spread) = hist_mean_spread(&img);
-  qattrs.mean_intensity = mean;
-  qattrs.hist_spread = spread;
+  fast_histogram_analysis(&img, &mut qattrs);
   // println!("{} << end histo ",  timest(&mut tsms));
   timex(&mut tsms, &mut durations);
 
