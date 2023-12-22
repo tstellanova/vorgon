@@ -54,7 +54,7 @@ fn process_video_segment(segment: &SegmentDecscriptor,
     let _ = write_stream.write_all(b"frame,i_mean,hspread,ncorners,nspikes,ndark,nbright");
     let _ = write_stream.write(b"\r\n");
     let _ = write_stream.flush();
-    
+
     let mut packet_count:usize = 0;
     for (stream, packet) in ictx.packets() {
       if stream.index() == video_stream_index {

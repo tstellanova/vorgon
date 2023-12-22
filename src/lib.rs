@@ -204,8 +204,8 @@ pub fn fast_histogram_analysis(image: &GrayImage, qattrs: &mut MonoImageQAttribu
         if intensity > max_intensity { max_intensity = intensity; }
         if intensity < min_intensity { min_intensity = intensity; }
         total_intensity +=  (count as usize) * i ;
-        // guessing that a gaussian dist centered at 127.5
-        // will have exceptional pixels within 1 stddev of min and max
+        // a gaussian distribution centered at 127.5
+        // will have exceptional pixels within 1 stddev (255/6) of min and max
         if intensity < 43 { qattrs.dark_pixel_count += count as u32; }
         else if intensity > (u8::MAX - 43) { qattrs.bright_pixel_count += count as u32; }
 
