@@ -8,8 +8,8 @@ use ffmpeg::util::frame::video::Video;
 
 // use std::env;
 use serde::{Deserialize, Serialize};
-use std::fs::File;
-use std::io::{Read};
+use std::fs::{File};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use image::buffer::ConvertBuffer;
@@ -23,24 +23,7 @@ fn process_video_segment(segment: &SegmentDecscriptor,
                          write_stream: &mut impl std::io::Write
 )
 {
-                         // BufWriter<&[u8]>)  {
-  // // TODO use clap instead for CLI args?
-  // let filename = env::args().nth(1).expect("need video filename");
-  // let start_frame = env::args().nth(2).expect("no start frame").parse::<usize>().unwrap();
-  // let end_frame = env::args().nth(3).expect("no end frame").parse::<usize>().unwrap();
-  //
-  // let regx = Regex::new(r"(\w+)\-(\d+)\.").unwrap();
-  // let hay = filename.clone();
-  // let finds = regx.captures(&hay).unwrap();
-  // let video_file_prefix = &finds[1];
-  // let video_id = &finds[2];
-  //
-  // println!("# prefix: {:?} video_id: {:?} start: {} end: {}",
-  //          video_file_prefix, video_id, start_frame, end_frame);
 
-
-  // CSV header
-  let _ = write_stream.write_all("frame,mean_intensity,hist_spread,f12_corners".as_ref());
 
   if let Ok(mut ictx) = ffmpeg_input(&segment.file_path) {
     let input = ictx
@@ -67,6 +50,11 @@ fn process_video_segment(segment: &SegmentDecscriptor,
     let min_packet_frame = if segment.start_frame > 120 { segment.start_frame-120 } else {0};
     let max_packet_frame = segment.end_frame+30;
 
+    // CSV header
+    let _ = write_stream.write_all(b"frame,i_mean,hspread,ncorners,nspikes,ndark,nbright");
+    let _ = write_stream.write(b"\r\n");
+    let _ = write_stream.flush();
+    
     let mut packet_count:usize = 0;
     for (stream, packet) in ictx.packets() {
       if stream.index() == video_stream_index {
@@ -100,6 +88,9 @@ fn process_video_segment(segment: &SegmentDecscriptor,
       write_stream
     ).unwrap();
   }
+  else {
+    eprintln!("Unable to open: {:?}",segment.file_path);
+  }
 
 }
 
@@ -119,6 +110,7 @@ fn receive_and_process_decoded_frames(
       scaler.run(&decoded, &mut rgb_frame)?;
       let summary = process_frame(&rgb_frame,  frame_idx).unwrap();
       write_stream.write_all(summary.as_bytes()).unwrap();
+      write_stream.write(b"\r\n").unwrap();
     }
   }
   Ok(())
@@ -140,11 +132,17 @@ fn process_frame(frame: &Video,  index: usize) -> std::result::Result<String, st
   let crop_img = crop_gray_to_percent(&gray_img, 0.8);
 
   let qattr = fast_analyze_image(&crop_img);
-  let frame_qstr = format!("{},{},{:0.6},{}",
+  let frame_qstr = format!("{},{},{:0.6},{}, {},{},{}",
              index,
              qattr.mean_intensity,
              qattr.hist_spread,
-             qattr.corner_count_f12);
+             qattr.corner_count_f12,
+
+              qattr.hist_spike_count,
+              qattr.dark_pixel_count,
+              qattr.bright_pixel_count,
+
+  );
 
   Ok(frame_qstr)
 }
@@ -263,6 +261,8 @@ fn get_segments_list(manifest_path: &Path) -> Vec<SegmentDecscriptor> {
           desc.validated_runway = false;
           // println!("failed {},{},{},\"{}\"", approach.stream, approach.start_frame, approach.end_frame,
           //          approach.note.unwrap() );
+          desc.start_frame = approach.start_frame;
+          desc.end_frame = approach.end_frame;
         }
         else {
           // println!("valid {},{},{}", approach.stream, approach.start_frame, approach.end_frame);
@@ -276,7 +276,8 @@ fn get_segments_list(manifest_path: &Path) -> Vec<SegmentDecscriptor> {
         }
 
         desc.file_path = manifest_path.with_file_name(approach.stream.clone() + ".mp4");
-        println!("video file_path: {:?}", desc.file_path);
+        println!("viz {} start {} end {} video: {:?}",
+                 desc.validated_runway, desc.start_frame, desc.end_frame, desc.file_path);
         segments.push(desc);
       }
     }
@@ -295,13 +296,31 @@ fn main() {
   let segments = get_segments_list(&manifest_path);
   println!("nsegments: {}", segments.len());
 
-  let out_path = manifest_path.parent().unwrap().with_file_name("output.csv");
-  println!("out_path: {:?}", out_path);
-  let mut outfile = File::create(&out_path).unwrap();
-
   for seg in segments {
-    process_video_segment(&seg, &mut outfile);
+    if let Some(file_stem) = seg.file_path.file_stem()  {
+      let outfile_namestr = format!("abrade_{}-{}-{}.csv",
+                                    file_stem.to_str().unwrap() ,seg.start_frame, seg.end_frame);
+      let out_path = manifest_path.with_file_name(outfile_namestr);
+      println!("out_path: {:?}", out_path);
+      let mut outfile = File::create(&out_path).unwrap();
+      process_video_segment(&seg, &mut outfile);
+      let _ = outfile.flush();
+    }
   }
 
 }
 
+
+// // TODO use clap instead for CLI args?
+// let filename = env::args().nth(1).expect("need video filename");
+// let start_frame = env::args().nth(2).expect("no start frame").parse::<usize>().unwrap();
+// let end_frame = env::args().nth(3).expect("no end frame").parse::<usize>().unwrap();
+//
+// let regx = Regex::new(r"(\w+)\-(\d+)\.").unwrap();
+// let hay = filename.clone();
+// let finds = regx.captures(&hay).unwrap();
+// let video_file_prefix = &finds[1];
+// let video_id = &finds[2];
+//
+// println!("# prefix: {:?} video_id: {:?} start: {} end: {}",
+//          video_file_prefix, video_id, start_frame, end_frame);

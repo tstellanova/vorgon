@@ -190,7 +190,7 @@ pub fn fast_histogram_analysis(image: &GrayImage, qattrs: &mut MonoImageQAttribu
 
   let total_pixels: usize = (image.width() * image.height()) as usize;
 
-  let spike_threshold = (total_pixels as f32 * 0.1 ) as i32;
+  let spike_threshold = (total_pixels as f32 * 0.01 ) as i32;
   let mut prev_count: i32 = 0;
 
   if let Some(hist) = channel_hist.channels.first() {
