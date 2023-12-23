@@ -1,6 +1,7 @@
 
 
 use image::{DynamicImage, imageops::crop_imm};
+// use image::buffer::ConvertBuffer;
 
 use image_compare::{
   Metric,
@@ -17,7 +18,6 @@ use imageproc::{
   // stats::ChannelHistogram,
 };
 use imageproc::corners::corners_fast9;
-// use imageproc::drawing::Canvas;
 
 /// Describes the "inherent" quality of a single-channel image
 /// with no reference to another image.
@@ -38,8 +38,12 @@ pub struct MonoImageQAttributes {
   pub dark_pixel_count: u32,
   /// Count of pixels above the "high" brightness threshold
   pub bright_pixel_count: u32,
-  /// Count of spikes in the histogram
-  pub hist_spike_count: u32,
+
+  /// What percent of total pixels is the lowest standard deviation?
+  pub dark_percent: f32,
+  /// What percentage of total pixels is the highest standard deviation?
+  pub bright_percent: f32,
+
   /// FAST9 corners
   pub corner_count_f12: u32,
   /// FAST12 corners
@@ -166,16 +170,99 @@ pub fn hist_mean_spread_flatness(image: &GrayImage, qattrs: &mut MonoImageQAttri
   }
 
   let quartile_distance = third_quartile  - first_quartile ;
-  let hist_spread = (quartile_distance as f64) / 255.0;
-  let mean_intensity = (total_intensity / total_pixels) as u8;
-
-  qattrs.mean_intensity = mean_intensity;
-  qattrs.hist_spread = hist_spread;
+  qattrs.hist_spread = (quartile_distance as f64) / 255.0;
+  qattrs.mean_intensity  = f32::round(total_intensity as f32 / total_pixels as f32) as u8;
   qattrs.hist_flatness = hfm;
   // qattrs.raw_histogram = channel_hist;
 
 }
 
+/// Find the top few peaks in the histogram
+pub fn find_peaks_in_histogram(hist: &[u32; 256]) -> Vec<(u8, u32)> {
+  let mut peaks = vec![];
+
+  // Check first bucket
+  if hist[0] > hist[1] {
+    peaks.push((0, hist[0]) );
+  }
+
+  // Check intermediate buckets
+  for i in 1..255 {
+    if hist[i] > hist[i - 1] && hist[i] > hist[i + 1] {
+      peaks.push((i as u8, hist[i]) );
+    }
+  }
+
+  // Check last bucket
+  if hist[255] > hist[254] {
+    peaks.push((255, hist[255]) );
+  }
+
+  let mut peak_val_accumulator = 0;
+  let mut npeaks = 0;
+  for peak in &peaks {
+    peak_val_accumulator += &peak.1;
+    npeaks +=1;
+  }
+  let mean_peak_val = peak_val_accumulator / npeaks;
+
+  let mut filtered_peaks = vec![];
+  for peak in peaks {
+    if peak.1 > mean_peak_val {
+      filtered_peaks.push(peak);
+    }
+  }
+
+  // grab the top three peaks
+  filtered_peaks.sort_by(|a, b| b.1.cmp(&a.1));
+  filtered_peaks.into_iter().take(5).collect()
+
+}
+
+/// Pull a single channel out of an RgbImage, as a GrayImage
+pub fn mono_as_grey(input: &ImageBuffer<Rgb<u8>, &[u8]>, channel: usize) -> GrayImage {
+  let mut output: GrayImage = GrayImage::new(input.width(), input.height());
+  for (out_pixel, in_pixel) in output.pixels_mut().zip(input.pixels()) {
+    out_pixel.0[0] = in_pixel.0[channel];
+  }
+  output
+}
+
+/// Combine red and green channels to obtain a combined luma
+pub fn red_green_as_grey(input: &ImageBuffer<Rgb<u8>, &[u8]>) -> GrayImage {
+  // refer to rgb_to_luma -- this is an inaccurate sRGB conversion
+  let mut output: GrayImage = GrayImage::new(input.width(), input.height());
+  for (out_pixel, in_pixel) in output.pixels_mut().zip(input.pixels()) {
+    out_pixel.0[0] = ((in_pixel.0[0] as u16 + 3*(in_pixel.0[1] as u16))/4) as u8 ;
+  }
+  output
+}
+
+
+///
+pub fn preprocess_rgb_to_gray(input: &ImageBuffer<Rgb<u8>, &[u8]>) -> GrayImage
+{
+  let work_img = red_green_as_grey(&input);
+  // let work_img: GrayImage = input.convert();
+
+  // inject some noise
+  // let work_img = imageproc::noise::gaussian_noise(
+  //   &work_img,21.0, 10.0, 555666777888);
+  // let work_img= imageproc::noise::salt_and_pepper_noise(
+  //   &work_img, 1E-4, 888777666555);
+
+  // let work_img = imageproc::filter::gaussian_blur_f32(&work_img,  1.0);
+  // let work_img = imageproc::filter::bilateral_filter(&work_img,8, 2.0, 1.0);
+
+  // remove vignetting
+  let work_img = crop_gray_to_percent(&work_img, 0.8);
+
+  // let work_img = imageproc::contrast::stretch_contrast(&work_img, 20, 235);
+  // let work_img = imageproc::contrast::equalize_histogram(&work_img);
+
+  work_img
+
+}
 
 /// Performs histogram analysis
 pub fn fast_histogram_analysis(image: &GrayImage, qattrs: &mut MonoImageQAttributes)
@@ -190,10 +277,10 @@ pub fn fast_histogram_analysis(image: &GrayImage, qattrs: &mut MonoImageQAttribu
 
   let total_pixels: usize = (image.width() * image.height()) as usize;
 
-  let spike_threshold = (total_pixels as f32 * 0.01 ) as i32;
-  let mut prev_count: i32 = 0;
-
   if let Some(hist) = channel_hist.channels.first() {
+    // let lum_peaks = find_peaks_in_histogram(&hist);
+    // println!("lum_peaks: {:?}", lum_peaks);
+
     let first_quartile_count = total_pixels / 4;
     let third_quartile_count =  3 * total_pixels / 4;
 
@@ -209,13 +296,6 @@ pub fn fast_histogram_analysis(image: &GrayImage, qattrs: &mut MonoImageQAttribu
         if intensity < 43 { qattrs.dark_pixel_count += count as u32; }
         else if intensity > (u8::MAX - 43) { qattrs.bright_pixel_count += count as u32; }
 
-        let diff = count - prev_count;
-        if diff > spike_threshold {
-          // a spike is any sudden change in count for histogram bucket
-          qattrs.hist_spike_count += 1;
-        }
-        prev_count = count;
-
         // histogram spreading calculation
         cumulative_count += count as usize;
         if (first_quartile == 0) && (cumulative_count >= first_quartile_count) {
@@ -228,13 +308,14 @@ pub fn fast_histogram_analysis(image: &GrayImage, qattrs: &mut MonoImageQAttribu
     }
   }
 
+  let total_pix_f32 = total_pixels as f32;
+  qattrs.dark_percent = qattrs.dark_pixel_count as f32 / total_pix_f32;
+  qattrs.bright_percent = qattrs.bright_pixel_count as f32 / total_pix_f32;
+
   let quartile_distance = third_quartile  - first_quartile ;
   // TODO should we actually use (max_intensity - min_intensity) for divisor (range)?
-  let hist_spread = (quartile_distance as f64) / 255.0;
-  let mean_intensity = (total_intensity as f32 / total_pixels as f32) as u8;
-
-  qattrs.mean_intensity = mean_intensity;
-  qattrs.hist_spread = hist_spread;
+  qattrs.hist_spread = (quartile_distance as f64) / 255.0;
+  qattrs.mean_intensity = f32::round(total_intensity as f32 / total_pix_f32) as u8;
   // qattrs.raw_histogram = channel_hist;
 }
 
@@ -288,13 +369,6 @@ pub fn fast_analyze_image(img: &GrayImage)  -> MonoImageQAttributes {
   qattrs.width = img.width();
   qattrs.height = img.height();
 
-  // timest(&mut tsms);
-  // // // println!("{} >> start sharpness ",  timest(&mut tsms));
-  // let (_laplace_img, sharpness ) = laplacian_variance(&img);
-  // qattrs.sharpness = sharpness;
-  // // // println!("{} << end sharpness ",  timest(&mut tsms));
-  // timex(&mut tsms, &mut durations);
-
   timest(&mut tsms);
   // println!("{} >> start histo ",  timest(&mut tsms));
   fast_histogram_analysis(&img, &mut qattrs);
@@ -307,12 +381,6 @@ pub fn fast_analyze_image(img: &GrayImage)  -> MonoImageQAttributes {
   qattrs.corner_count_f12 = count_corners_fast12(&img);
   // println!("{} << end corners ",  timest(&mut tsms));
   timex(&mut tsms, &mut durations);
-
-  // timest(&mut tsms);
-  // // println!("{} >> start corners ",  timest(&mut tsms));
-  // qattrs.corner_count_f9 = count_corners_fast9(&img);
-  // // println!("{} << end corners ",  timest(&mut tsms));
-  // timex(&mut tsms, &mut durations);
 
   // println!("analyze durations {:?}", durations);
 

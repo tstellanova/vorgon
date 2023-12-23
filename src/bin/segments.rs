@@ -1,3 +1,4 @@
+
 use std::env;
 use ffmpeg_next as ffmpeg;
 use ffmpeg::format::input as ffmpeg_input;
@@ -12,11 +13,9 @@ use std::fs::{File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use image::buffer::ConvertBuffer;
-
 use image::{GrayImage, ImageBuffer};
 // use regex::Regex;
-use vorgon::{crop_gray_to_percent, fast_analyze_image, MonoImageQAttributes};
+use vorgon::{fast_analyze_image, MonoImageQAttributes, preprocess_rgb_to_gray};
 
 
 fn process_video_segment(segment: &SegmentDecscriptor,
@@ -47,11 +46,12 @@ fn process_video_segment(segment: &SegmentDecscriptor,
     ).unwrap();
 
     // TODO this is a heuristic guess at where we'll find a keyframe prior to region of interest
-    let min_packet_frame = if segment.start_frame > 120 { segment.start_frame-120 } else {0};
-    let max_packet_frame = segment.end_frame+30;
+    // start at nearest 250 -- keyframe is at 250 + 1 ?
+    let min_packet_frame =  (segment.start_frame / 250) * 250;
+    let max_packet_frame = segment.end_frame+10;
 
     // CSV header
-    let _ = write_stream.write_all(b"frame,i_mean,hspread,ncorners,nspikes,ndark,nbright");
+    let _ = write_stream.write_all(b"frame,i_mean,hspread,ncorners,pdark,pbright");
     let _ = write_stream.write(b"\r\n");
     let _ = write_stream.flush();
 
@@ -59,8 +59,7 @@ fn process_video_segment(segment: &SegmentDecscriptor,
     for (stream, packet) in ictx.packets() {
       if stream.index() == video_stream_index {
         //prefilter of frames avoids sending lots of extraneous stuff to decoder
-        if packet_count == 0 ||
-          ((packet_count > min_packet_frame as usize) && (packet_count < max_packet_frame as usize)) {
+        if (packet_count > min_packet_frame as usize) && (packet_count < max_packet_frame as usize) {
           decoder.send_packet(&packet).unwrap();
           receive_and_process_decoded_frames(
             &mut decoder,
@@ -120,27 +119,25 @@ fn receive_and_process_decoded_frames(
 // 1670019436 12:30 --> frame (12*60 + 30) * 30 = 22500
 // 1670019436 03:48 --> frame (3*603 + 48) * 30 = 6840
 
+
+
 fn process_frame(frame: &Video,  index: usize) -> std::result::Result<String, std::io::Error> {
   // for convenience we wrap the video data into an image::ImageBuffer
   let img_buf: ImageBuffer<image::Rgb<u8>, &[u8]> = image::ImageBuffer::from_raw(
     frame.width(), frame.height(), frame.data(0)).unwrap();
 
   // for image quality analysis we're mostly interested in grayscale
-  let gray_img: GrayImage = img_buf.convert();
+  let gray_img: GrayImage = preprocess_rgb_to_gray(&img_buf);
 
-  // our images have strong vignetting, so we crop out the edges
-  let crop_img = crop_gray_to_percent(&gray_img, 0.8);
-
-  let qattr = fast_analyze_image(&crop_img);
-  let frame_qstr = format!("{},{},{:0.6},{}, {},{},{}",
+  let qattr = fast_analyze_image(&gray_img);
+  let frame_qstr = format!("{},{},{:0.6},{}, {:0.2},{:0.2}",
              index,
              qattr.mean_intensity,
              qattr.hist_spread,
              qattr.corner_count_f12,
 
-              qattr.hist_spike_count,
-              qattr.dark_pixel_count,
-              qattr.bright_pixel_count,
+              qattr.dark_percent,
+              qattr.bright_percent,
 
   );
 
@@ -279,6 +276,7 @@ fn get_segments_list(manifest_path: &Path) -> Vec<SegmentDecscriptor> {
         println!("viz {} start {} end {} video: {:?}",
                  desc.validated_runway, desc.start_frame, desc.end_frame, desc.file_path);
         segments.push(desc);
+
       }
     }
   }
@@ -296,7 +294,13 @@ fn main() {
   let segments = get_segments_list(&manifest_path);
   println!("nsegments: {}", segments.len());
 
+
+
   for seg in segments {
+    let min_packet_frame =  (seg.start_frame / 250) * 250;
+    let max_packet_frame = seg.end_frame+10;
+    println!("buffer start {} end {}", min_packet_frame, max_packet_frame);
+
     if let Some(file_stem) = seg.file_path.file_stem()  {
       let outfile_namestr = format!("abrade_{}-{}-{}.csv",
                                     file_stem.to_str().unwrap() ,seg.start_frame, seg.end_frame);
