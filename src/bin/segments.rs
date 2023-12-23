@@ -23,13 +23,23 @@ fn process_video_segment(segment: &SegmentDecscriptor,
 )
 {
 
-
   if let Ok(mut ictx) = ffmpeg_input(&segment.file_path) {
+    let guess_time_ms: i64 = (segment.start_frame * 1000 / 30) as i64;
+    let rangey = std::ops::Range {
+      start: guess_time_ms - (250/30),
+      end: guess_time_ms + 500,
+    };
+
+    //TODO use ictx.seek to jump to segment.start_frame
+    ictx.seek(guess_time_ms, rangey).unwrap();
+
     let input = ictx
       .streams()
       .best(Type::Video)
       .ok_or(ffmpeg::Error::StreamNotFound).unwrap();
     let video_stream_index = input.index();
+
+
 
     let context_decoder =
       ffmpeg::codec::context::Context::from_parameters(input.parameters()).unwrap();
@@ -273,7 +283,7 @@ fn get_segments_list(manifest_path: &Path) -> Vec<SegmentDecscriptor> {
         }
 
         desc.file_path = manifest_path.with_file_name(approach.stream.clone() + ".mp4");
-        println!("viz {} start {} end {} video: {:?}",
+        println!("annotated? {} start: {} end: {} video: {:?}",
                  desc.validated_runway, desc.start_frame, desc.end_frame, desc.file_path);
         segments.push(desc);
 
@@ -295,11 +305,13 @@ fn main() {
   println!("nsegments: {}", segments.len());
 
 
-
   for seg in segments {
     let min_packet_frame =  (seg.start_frame / 250) * 250;
     let max_packet_frame = seg.end_frame+10;
-    println!("buffer start {} end {}", min_packet_frame, max_packet_frame);
+    println!("buffer packet start {} end {} frame start {} end {}",
+             min_packet_frame, max_packet_frame,
+              seg.start_frame, seg.end_frame
+    );
 
     if let Some(file_stem) = seg.file_path.file_stem()  {
       let outfile_namestr = format!("abrade_{}-{}-{}.csv",
