@@ -22,15 +22,23 @@ fn process_video_segment(segment: &SegmentDecscriptor,
                          write_stream: &mut impl std::io::Write
 )
 {
+  // TODO this is a heuristic guess at where we'll find a keyframe prior to region of interest
+  // start at nearest 250 -- keyframe is at 250 + 1 ?
+  let min_packet_frame =  ((segment.start_frame / 250) * 250) - 1;
+  let max_packet_frame = segment.end_frame+10;
+  println!("buffer packet start {} end {} frame start {} end {}",
+           min_packet_frame, max_packet_frame,
+           segment.start_frame, segment.end_frame
+  );
 
   if let Ok(mut ictx) = ffmpeg_input(&segment.file_path) {
-    let guess_time_ms: i64 = (segment.start_frame * 1000 / 30) as i64;
+    let guess_time_ms: i64 = (min_packet_frame * 1000 / 30) as i64;
     let rangey = std::ops::Range {
-      start: guess_time_ms - (250/30),
-      end: guess_time_ms + 500,
+      start: guess_time_ms - 1000,
+      end: guess_time_ms + 1000,
     };
 
-    //TODO use ictx.seek to jump to segment.start_frame
+    //jump to closest keyframe
     ictx.seek(guess_time_ms, rangey).unwrap();
 
     let input = ictx
@@ -38,7 +46,6 @@ fn process_video_segment(segment: &SegmentDecscriptor,
       .best(Type::Video)
       .ok_or(ffmpeg::Error::StreamNotFound).unwrap();
     let video_stream_index = input.index();
-
 
 
     let context_decoder =
@@ -55,10 +62,7 @@ fn process_video_segment(segment: &SegmentDecscriptor,
       Flags::BILINEAR,
     ).unwrap();
 
-    // TODO this is a heuristic guess at where we'll find a keyframe prior to region of interest
-    // start at nearest 250 -- keyframe is at 250 + 1 ?
-    let min_packet_frame =  (segment.start_frame / 250) * 250;
-    let max_packet_frame = segment.end_frame+10;
+
 
     // CSV header
     let _ = write_stream.write_all(b"frame,i_mean,hspread,ncorners,pdark,pbright");
@@ -69,7 +73,7 @@ fn process_video_segment(segment: &SegmentDecscriptor,
     for (stream, packet) in ictx.packets() {
       if stream.index() == video_stream_index {
         //prefilter of frames avoids sending lots of extraneous stuff to decoder
-        if (packet_count > min_packet_frame as usize) && (packet_count < max_packet_frame as usize) {
+        if (packet_count >= min_packet_frame as usize) && (packet_count <= max_packet_frame as usize) {
           decoder.send_packet(&packet).unwrap();
           receive_and_process_decoded_frames(
             &mut decoder,
@@ -306,13 +310,6 @@ fn main() {
 
 
   for seg in segments {
-    let min_packet_frame =  (seg.start_frame / 250) * 250;
-    let max_packet_frame = seg.end_frame+10;
-    println!("buffer packet start {} end {} frame start {} end {}",
-             min_packet_frame, max_packet_frame,
-              seg.start_frame, seg.end_frame
-    );
-
     if let Some(file_stem) = seg.file_path.file_stem()  {
       let outfile_namestr = format!("abrade_{}-{}-{}.csv",
                                     file_stem.to_str().unwrap() ,seg.start_frame, seg.end_frame);
