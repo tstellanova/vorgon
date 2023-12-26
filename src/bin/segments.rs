@@ -1,4 +1,8 @@
 
+
+//! Process a video file as a series of image frames
+
+use std::sync::{Mutex};
 use std::env;
 use ffmpeg_next as ffmpeg;
 use ffmpeg::format::input as ffmpeg_input;
@@ -12,10 +16,11 @@ use serde::{Deserialize, Serialize};
 use std::fs::{File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+// use std::sync::atomic::{AtomicU32, Ordering};
 
 use image::{GrayImage, ImageBuffer};
 // use regex::Regex;
-use vorgon::{fast_analyze_image, MonoImageQAttributes, preprocess_rgb_to_gray};
+use vorgon::{compare_images, fast_analyze_image, MonoImageQAttributes, preprocess_rgb_to_gray};
 
 
 fn process_video_segment(segment: &SegmentDecscriptor,
@@ -65,7 +70,7 @@ fn process_video_segment(segment: &SegmentDecscriptor,
 
 
     // CSV header
-    let _ = write_stream.write_all(b"frame,i_mean,hspread,ncorners,pdark,pbright");
+    let _ = write_stream.write_all(b"frame,i_mean,hspread,ncorners,pdark,pbright, HSIM,SSIM");
     let _ = write_stream.write(b"\r\n");
     let _ = write_stream.flush();
 
@@ -135,7 +140,12 @@ fn receive_and_process_decoded_frames(
 
 
 
-fn process_frame(frame: &Video,  index: usize) -> std::result::Result<String, std::io::Error> {
+
+
+fn process_frame(frame: &Video,  index: usize) -> Result<String, std::io::Error> {
+  // static FRAME_PROC_COUNT:AtomicU32 = AtomicU32::new(0);
+  static PRIOR_FRAME: Mutex<Option<GrayImage>> = Mutex::new(None);
+
   // for convenience we wrap the video data into an image::ImageBuffer
   let img_buf: ImageBuffer<image::Rgb<u8>, &[u8]> = image::ImageBuffer::from_raw(
     frame.width(), frame.height(), frame.data(0)).unwrap();
@@ -144,18 +154,33 @@ fn process_frame(frame: &Video,  index: usize) -> std::result::Result<String, st
   let gray_img: GrayImage = preprocess_rgb_to_gray(&img_buf);
 
   let qattr = fast_analyze_image(&gray_img);
-  let frame_qstr = format!("{},{},{:0.6},{}, {:0.2},{:0.2}",
-             index,
-             qattr.mean_intensity,
-             qattr.hist_spread,
-             qattr.corner_count_f12,
+  let mut hsim_score = 0.0;
+  let mut ssim_score = 0.0;
 
-              qattr.dark_percent,
-              qattr.bright_percent,
+  if let Ok(mut prior_frame_mutex) = PRIOR_FRAME.lock() {
+    if let Some(prior_frame) = prior_frame_mutex.take() {
+      let (cmp, _) =
+        compare_images(&prior_frame, &gray_img, false);
+      hsim_score = cmp.hsim_score;
+      ssim_score = cmp.ssim_score;
+    }
+    *prior_frame_mutex = Some(gray_img);
+  }
 
+  // write the CSV of frame analysis
+  let image_str = format!("{},{},{:0.6},{}, {:0.2},{:0.2}, {:0.8}, {:0.8}",
+                          index,
+                          qattr.mean_intensity,
+                          qattr.hist_spread,
+                          qattr.corner_count_f12,
+                          qattr.dark_percent,
+                          qattr.bright_percent,
+                          hsim_score,
+                          ssim_score,
   );
 
-  Ok(frame_qstr)
+  // FRAME_PROC_COUNT.fetch_add(1,Ordering::Relaxed);
+  Ok(image_str)
 }
 
 const INTENSITY_MEAN: f32 = 117.0;

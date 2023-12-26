@@ -429,11 +429,11 @@ pub fn compare_images(img1: &GrayImage, img2: &GrayImage, gen_map: bool)
   let mut tsms:i64 = 0;
   let mut comparison = ImgComparison::default();
 
-  timest(&mut tsms);
-  // println!("{} >> start RMS:",timest(&mut tsms));
-  comparison.rms_error = imageproc::stats::root_mean_squared_error(img1, img2);
-  // println!("{} << end RMS ",  timex(&mut tsms, &mut durations));
-  timex(&mut tsms, &mut durations);
+  // timest(&mut tsms);
+  // // println!("{} >> start RMS:",timest(&mut tsms));
+  // comparison.rms_error = imageproc::stats::root_mean_squared_error(img1, img2);
+  // // println!("{} << end RMS ",  timex(&mut tsms, &mut durations));
+  // timex(&mut tsms, &mut durations);
 
   timest(&mut tsms);
   // println!("{} >> start SSIM", timest(&mut tsms));
