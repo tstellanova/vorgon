@@ -13,41 +13,42 @@ use image::{GrayImage};
 use vorgon::{compare_images, fast_analyze_image};
 
 
-fn process_frame(first: &GrayImage, second: &GrayImage) -> Result<String, std::io::Error> {
+fn process_frame(first: &GrayImage, second: &GrayImage) -> Result<(String, f64, f64), std::io::Error> {
 
-  let qattr1 = fast_analyze_image(&first);
-  let qattr2 = fast_analyze_image(&second);
+  // let qattr1 = fast_analyze_image(&first);
+  // let qattr2 = fast_analyze_image(&second);
 
   let (cmp, _) = compare_images(&first, &second, false);
 
   // write the CSV of frame analysis
 
-  let first_attr_str = format!("\
-  \r\nmean_intensity, hist_spread, corner_count_f12, dark_percent, bright_percent \
-  \r\n{},{:0.6},{}, {:0.2},{:0.2} \r\n",
-                          qattr1.mean_intensity,
-                          qattr1.hist_spread,
-                          qattr1.corner_count_f12,
-                          qattr1.dark_percent,
-                          qattr1.bright_percent,
-  );
-  let second_attr_str = format!("\
-  {},{:0.6},{}, {:0.2},{:0.2} \r\n",
-                          qattr2.mean_intensity,
-                          qattr2.hist_spread,
-                          qattr2.corner_count_f12,
-                          qattr2.dark_percent,
-                          qattr2.bright_percent,
-  );
+  // let first_attr_str = format!("\
+  // \r\nmean_intensity, hist_spread, corner_count_f12, dark_percent, bright_percent \
+  // \r\n{},{:0.6},{}, {:0.2},{:0.2} \r\n",
+  //                         qattr1.mean_intensity,
+  //                         qattr1.hist_spread,
+  //                         qattr1.corner_count_f12,
+  //                         qattr1.dark_percent,
+  //                         qattr1.bright_percent,
+  // );
+  // let second_attr_str = format!("\
+  // {},{:0.6},{}, {:0.2},{:0.2} \r\n",
+  //                         qattr2.mean_intensity,
+  //                         qattr2.hist_spread,
+  //                         qattr2.corner_count_f12,
+  //                         qattr2.dark_percent,
+  //                         qattr2.bright_percent,
+  // );
 
-  let cmp_str = format!("hsim {:0.8}, ssim {:0.8} ",
+  let cmp_str = format!("hsim {:+e}, ssim {:+e}",
                         cmp.hsim_score,
                         cmp.ssim_score,
   );
 
-  let res = first_attr_str + &second_attr_str + &cmp_str;
+  // let res = first_attr_str + &second_attr_str + &cmp_str;
+  let res = cmp_str;
 
-  Ok(res)
+  Ok( (res, cmp.hsim_score, cmp.ssim_score) )
 }
 
 
@@ -160,6 +161,28 @@ fn get_segments_list(manifest_path: &Path) -> Vec<SegmentDecscriptor> {
   segments
 }
 
+fn compare_two(video_id: &str, frame_id: u32, one:&PathBuf, two: &PathBuf) -> Option<(f64, f64)> {
+  // the image frame collected by the slow process is more accurate?
+  if let Ok(first_image) = image::open(one.clone()) {
+    // the image collected by the fast process is usually within 4 frames of the slow process
+    if let Ok(second_image) = image::open(two.clone()) {
+      let first_gray = first_image.into_luma8();
+      let second_gray = second_image.into_luma8();
+      if let Ok((cmp_str, hsim, ssim) ) = process_frame(&first_gray, &second_gray) {
+        println!("\r\n=== video_id: {} frame_id: {} === {} ", video_id, frame_id, cmp_str);
+        return Some((hsim, ssim) );
+      }
+    }
+    else {
+      println!("\r\n<<< missing second file path: {:?}", two);
+    }
+  }
+  else {
+    println!("\r\n<<< missing first file path: {:?}", one);
+  }
+  None
+}
+
 fn main() {
   let manifest_path_str = env::args().nth(1).expect("need manifest file path");
 
@@ -178,28 +201,53 @@ fn main() {
                                     video_id, seg.annotated_frame);
         let fast_file_str = format!("{}_fast_{}.png",
                                     video_id, seg.annotated_frame);
+        let delta_file_str = format!("{}_delta_{}.png",
+                                     video_id, seg.annotated_frame);
         let parent_dir = manifest_path.parent().unwrap();
         // println!("parent_dir: {:?}", parent_dir);
 
-        let target_dir =  parent_dir.join("annotated_frames/");
+        let target_dir = parent_dir.join("annotated_frames/");
         // println!("target_dir: {:?}", target_dir);
 
         let slow_file_path = target_dir.join(slow_file_str);
         let fast_file_path = target_dir.join(fast_file_str);
+        let delta_file_path = target_dir.join(delta_file_str);
 
-        // the image frame collected by the slow process is more accurate?
-        if let Ok(first_image) = image::open(slow_file_path.clone()) {
-          // the image collected by the fast process is usually within 4 frames of the slow process
-          if let Ok(second_image) = image::open(fast_file_path.clone()) {
-            let first_gray = first_image.into_luma8();
-            let second_gray = second_image.into_luma8();
-            if let Ok(cmp_str) = process_frame(&first_gray, &second_gray) {
-              println!("\r\n=== video_id: {} annotated_frame: {} === {} ", video_id, seg.annotated_frame, cmp_str);
-            }
+        if let Some((hsim0, ssim0)) = compare_two(
+          &video_id, seg.annotated_frame, &slow_file_path, &slow_file_path) {
+          if ssim0 < 1.0 || hsim0 < 1.0 {
+            println!("<<< baseline SSIM: {} HSIM: {}", ssim0, hsim0);
           }
         }
-        else {
-          println!("\r\n<<< missing slow_file_path: {:?}", slow_file_path);
+
+        if let Some( (hsim1, ssim1) ) =  compare_two(
+          &video_id, seg.annotated_frame, &slow_file_path, &fast_file_path) {
+          if let Some((hsim2, ssim2)) = compare_two(
+            &video_id, seg.annotated_frame, &slow_file_path, &delta_file_path) {
+            if ssim1 > ssim2 {
+              let ssim_diff = ssim1 - ssim2;
+              println!("<<< Fast most similar SSIM by {:0.9}. HSIM {:0.8} vs {:0.8}",
+                       ssim_diff, hsim1, hsim2
+              );
+            }
+            else if ssim2 > ssim1 {
+              let ssim_diff = ssim2 - ssim1;
+              println!("<<< Delta most similar SSIM by {:0.9}. HSIM {:0.8} vs {:0.8}",
+                       ssim_diff, hsim2, hsim1
+              );
+            }
+            else {
+              if hsim1 == hsim2 {
+                println!("<<< Delta and Fast fully identical? SSIM {:+e}  HSIM {:+e} ",
+                         ssim1, hsim1);
+              }
+              else {
+                // in practice we don't ever seem to hit this
+                println!("<<< Delta and Fast SSIM identical: {:+e}. HSIM {:+e} vs {:+e}",
+                         ssim1, hsim2, hsim1);
+              }
+            }
+          }
         }
 
       }
